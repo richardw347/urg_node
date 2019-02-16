@@ -43,6 +43,10 @@
 #include <diagnostic_updater/diagnostic_updater.h>
 #include <diagnostic_updater/publisher.h>
 
+#define _USE_MATH_DEFINES
+#include <math.h>
+
+
 ///< @TODO Remove this and pass to the functions instead
 boost::shared_ptr<urg_node::URGCWrapper> urg_;
 boost::shared_ptr<dynamic_reconfigure::Server<urg_node::URGConfig> > srv_; ///< Dynamic reconfigure server
@@ -74,14 +78,12 @@ double freq_min_;
 
 bool reconfigure_callback(urg_node::URGConfig& config, int level){
   if(level < 0){ // First call, initialize, laser not yet started
-    urg_->setAngleLimitsAndCluster(config.angle_min, config.angle_max, config.cluster);
     urg_->setSkip(config.skip);
   } else if(level > 0){ // Must stop
     urg_->stop();
     ROS_INFO("Stopped data due to reconfigure.");
 
     // Change values that required stopping
-    urg_->setAngleLimitsAndCluster(config.angle_min, config.angle_max, config.cluster);
     urg_->setSkip(config.skip);
 
     try{
@@ -99,26 +101,9 @@ bool reconfigure_callback(urg_node::URGConfig& config, int level){
   // The publish frequency changes based on the number of skipped scans.
   // Update accordingly here.
   freq_min_ = 1.0/(urg_->getScanPeriod() * (config.skip + 1));
-
-  std::string frame_id = tf::resolve(config.tf_prefix, config.frame_id);
-  urg_->setFrameId(frame_id);
   urg_->setUserLatency(config.time_offset);
 
   return true;
-}
-
-void update_reconfigure_limits(){
-  urg_node::URGConfig min, max;
-  srv_->getConfigMin(min);
-  srv_->getConfigMax(max);
-
-  min.angle_min = urg_->getAngleMinLimit();
-  min.angle_max = min.angle_min;
-  max.angle_max = urg_->getAngleMaxLimit();
-  max.angle_min = max.angle_max;
-  
-  srv_->setConfigMin(min);
-  srv_->setConfigMax(max);
 }
 
 void calibrate_time_offset(){
@@ -223,6 +208,19 @@ int main(int argc, char **argv)
   double diagnostics_window_time;
   pnh.param<double>("diagnostics_window_time", diagnostics_window_time, 5.0);
 
+  std::string frame_id;
+  pnh.param<std::string>("frame_id", frame_id, "laser");
+  std::string tf_prefix;
+  pnh.param<std::string>("tf_prefix", tf_prefix, "");
+  frame_id = tf::resolve(tf_prefix, frame_id);
+
+  double angle_min;
+  pnh.param<double>("angle_min", angle_min, -M_PI);
+  double angle_max;
+  pnh.param<double>("angle_max", angle_max, M_PI);
+  int cluster;
+  pnh.param<int>("cluster", cluster, 1);
+
   // Set up publishers and diagnostics updaters, we only need one
   ros::Publisher laser_pub;
   laser_proc::LaserPublisher echoes_pub;
@@ -273,7 +271,13 @@ int main(int argc, char **argv)
 	  ss << " ID: " << urg_->getDeviceID();
 	  ROS_INFO_STREAM(ss.str());
 
-	  // Set up publishers and diagnostics updaters, we only need one
+      // set frame id
+      urg_->setFrameId(frame_id);
+
+      // set angle limits and cluster
+      urg_->setAngleLimitsAndCluster(angle_min, angle_max, cluster);
+
+      // Set up publishers and diagnostics updaters, we only need one
 	  if(publish_multiecho){
 	  	if(!echoes_pub){
 	    	echoes_pub = laser_proc::LaserTransport::advertiseLaser(n, 20);
@@ -310,9 +314,6 @@ int main(int argc, char **argv)
 
 	  // Set up dynamic reconfigure
 	  srv_.reset(new dynamic_reconfigure::Server<urg_node::URGConfig>());
-
-	  // Configure limits (Must do this after creating the urgwidget)
-	  update_reconfigure_limits();
 
 	  dynamic_reconfigure::Server<urg_node::URGConfig>::CallbackType f;
 	  f = boost::bind(reconfigure_callback, _1, _2);
